@@ -38,4 +38,11 @@ bool loadGLB(
 	GLuint * out_textureID = nullptr
 );
 
+// Point Cloud Loader (x y z nx ny nz per line)
+bool loadPointCloud(
+	const char* path,
+	std::vector<glm::vec3>& out_positions,
+	std::vector<glm::vec3>& out_normals
+);
+
 #endif // COMMON_H

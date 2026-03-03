@@ -305,3 +305,34 @@ bool loadGLB(
 	
 	return true;
 }
+
+bool loadPointCloud(
+	const char* path,
+	std::vector<glm::vec3>& out_positions,
+	std::vector<glm::vec3>& out_normals
+)
+{
+	printf("Loading point cloud: %s\n", path);
+	std::ifstream file(path);
+	if (!file.is_open())
+	{
+		printf("Failed to open point cloud file: %s\n", path);
+		return false;
+	}
+
+	std::string line;
+	while (std::getline(file, line))
+	{
+		if (line.empty()) continue;
+		std::istringstream iss(line);
+		float x, y, z, nx, ny, nz;
+		if (iss >> x >> y >> z >> nx >> ny >> nz)
+		{
+			out_positions.push_back(glm::vec3(x, y, z));
+			out_normals.push_back(glm::vec3(nx, ny, nz));
+		}
+	}
+
+	printf("Loaded %zu points\n", out_positions.size());
+	return !out_positions.empty();
+}
