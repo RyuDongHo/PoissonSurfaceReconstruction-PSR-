@@ -1,0 +1,6 @@
+# 외부 라이브러리는 언어 통계에서 제외
+lib/** linguist-vendored
+includes/stb_image.h linguist-vendored
+
+# 문서 파일은 documentation으로 표시
+*.md linguist-documentation

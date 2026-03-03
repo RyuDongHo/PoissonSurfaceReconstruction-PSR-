@@ -1,0 +1,40 @@
+# Build directories
+build/
+cmake-build-*/
+
+# Visual Studio
+.vs/
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sln
+
+# Compiled files
+*.exe
+*.dll
+*.obj
+*.o
+*.so
+*.dylib
+
+# IDE
+.vscode/*.log
+.vscode/settings.json
+.vscode/c_cpp_properties.json
+.idea/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Output files
+*.log
+*.out
+
+# Project files
+todo.txt
+
+# Resource files (ignored - add your own test files)
+resource/
