@@ -18,6 +18,7 @@
 #include <algorithm>
 #include "shader.h"
 #include "common.h"
+#include "Octree.h"
 
 // =============================================================================
 // Global Variables
@@ -34,6 +35,9 @@ GLFWwindow *window;
 // Point Cloud Data
 std::vector<glm::vec3> loadedPositions;
 std::vector<glm::vec3> loadedNormals;
+
+// Adaptive Octree (PSR)
+Octree* octree = nullptr;
 
 // OpenGL Resources
 GLuint vao;
@@ -294,7 +298,19 @@ int main(int argc, char *argv[])
                cameraTarget.x, cameraTarget.y, cameraTarget.z, cameraRadius);
     }
 
-    // 3. OpenGL init
+    // 3. Build Adaptive Octree
+    {
+        // maxDepth=8: 충분한 해상도 확보
+        // minPointsToSplit=1: 포인트가 2개 이상이면 분할 (leaf 1개에 최대 1 포인트)
+        octree = new Octree(8, 1);
+        octree->build(loadedPositions, loadedNormals);
+        octree->printStats();
+
+        // Splatting: 각 포인트의 법선을 주변 leaf 노드에 B-spline 가중치로 분배
+        octree->splat(loadedPositions, loadedNormals);
+    }
+
+    // 4. OpenGL init
     initGL();
 
     // 4. Render loop
@@ -306,6 +322,7 @@ int main(int argc, char *argv[])
         glfwPollEvents();
     }
 
+    delete octree;
     glfwTerminate();
     return 0;
 }
