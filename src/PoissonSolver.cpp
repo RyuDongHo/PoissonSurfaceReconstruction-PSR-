@@ -215,11 +215,12 @@ void PoissonSolver::solve(Octree *octree, int maxIter, float tol)
             if (std::fabsf(Lij) > 1e-14f)
                 Lrows[i].push_back({ j, Lij });
 
-            // b_i -= v_j · integral nabla F_i · F_j
+            // b_i += v_j · integral nabla F_i · F_j   (b = L^{-1} * <nablaF_i, V>)
+            // 유도: Green IBP 양변에 적용 → -<nablaF_i,nablaX> = -<nablaF_i,V> → 부호 상쇄
             if (glm::dot(nj->vectorCoeff, nj->vectorCoeff) > 1e-20f)
             {
                 glm::vec3 gFF = computeGradFdotF(ni, nj);
-                bvec[i] -= glm::dot(nj->vectorCoeff, gFF);
+                bvec[i] += glm::dot(nj->vectorCoeff, gFF);
             }
         }
     }
