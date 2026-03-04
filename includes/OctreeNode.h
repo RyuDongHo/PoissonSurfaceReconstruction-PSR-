@@ -32,9 +32,11 @@ public:
     std::vector<int> pointIndices;
 
     // ── PSR Splatting 필드 ────────────────────────────────────────────────
-    // vectorCoeff : Σ w_i * N_i  (법선 가중합, 정규화 전)
-    // splatWeight : Σ w_i        (가중치 합, 정규화에 사용)
-    // scalarValue : χ(o)         (Poisson 풀이 결과)
+    // densityCoeff : c_o = Σ_s α_{o,s}          (Phase1: W 계산용 밀도 계수)
+    // vectorCoeff  : Σ (α_{o,s}/W_s) * N_s      (Phase4: V의 basis 계수 α_o)
+    // splatWeight  : Σ α_{o,s}                   (진단용)
+    // scalarValue  : χ(o)                        (Poisson 풀이 결과, 추후)
+    float     densityCoeff;
     glm::vec3 vectorCoeff;
     float     splatWeight;
     float     scalarValue;
@@ -44,7 +46,7 @@ public:
                OctreeNode* parent_, int childIndex_)
         : center(center_), halfSize(halfSize_), depth(depth_),
           childIndex(childIndex_), parent(parent_),
-          vectorCoeff(0.0f), splatWeight(0.0f), scalarValue(0.0f)
+          densityCoeff(0.0f), vectorCoeff(0.0f), splatWeight(0.0f), scalarValue(0.0f)
     {
         for (int i = 0; i < 8; i++) children[i] = nullptr;
     }
@@ -58,16 +60,24 @@ public:
     }
 
     // ── B-spline basis ────────────────────────────────────────────────────
-    // Linear (tent) B-spline: B(t) = max(0, 1 - |t|)
-    // Support: t ∈ [-1, 1]
-    // 노드에서 t = (p_axis - center_axis) / halfSize 로 정규화
+    // F(x,y,z) ≡ (B(x)B(y)B(z))^{*n}  (논문 수식, n=3)
+    //
+    // n=3 → 1D quadratic B-spline (B*3):
+    //   |t| < 0.5  :  3/4 - t²
+    //   0.5 ≤ |t| < 1.5  :  (1/2)(1.5 - |t|)²
+    //   |t| ≥ 1.5  :  0
+    // Support: t ∈ (-1.5, 1.5)  (기존 tent의 [-1,1]에서 확장)
+    // Partition of unity: Σ_j B(t-j) = 1 ✓
     static float BSpline1D(float t)
     {
         t = std::fabsf(t);
-        return (t < 1.0f) ? (1.0f - t) : 0.0f;
+        if (t < 0.5f)  return 0.75f - t * t;
+        if (t < 1.5f)  { float u = 1.5f - t; return 0.5f * u * u; }
+        return 0.0f;
     }
 
     // 3D tensor-product basis: F_o(p) = B(tx) * B(ty) * B(tz)
+    // (getNeighbors27 이 이를 격자 기준으로 계산하므로 직접 호출은 드묾)
     float F(const glm::vec3& p) const
     {
         float tx = (p.x - center.x) / halfSize;

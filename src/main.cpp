@@ -280,8 +280,8 @@ int main(int argc, char *argv[])
     printf("Loaded %zu points\n", loadedPositions.size());
 
     // 2b. Auto-fit camera to point cloud bounding box
+    glm::vec3 bbMin = loadedPositions[0], bbMax = loadedPositions[0];
     {
-        glm::vec3 bbMin = loadedPositions[0], bbMax = loadedPositions[0];
         for (const auto& p : loadedPositions)
         {
             bbMin = glm::min(bbMin, p);
@@ -302,11 +302,14 @@ int main(int argc, char *argv[])
     {
         // maxDepth=8: 충분한 해상도 확보
         // minPointsToSplit=1: 포인트가 2개 이상이면 분할 (leaf 1개에 최대 1 포인트)
-        octree = new Octree(8, 1);
-        octree->build(loadedPositions, loadedNormals);
+        octree = new Octree(8, 6, 1);  // maxDepth=8, densityDepth=6(D_hat), minPointsToSplit=1
+        octree->build(loadedPositions, loadedNormals, bbMin, bbMax);
         octree->printStats();
 
-        // Splatting: 각 포인트의 법선을 주변 leaf 노드에 B-spline 가중치로 분배
+        // Phase 1: 샘플 밀도 필드 c_o 계산 (splat() 전에 반드시 호출)
+        octree->computeDensityField(loadedPositions);
+
+        // Phase 3~4: 논문 수식대로 trilinear splatting + 1/W_s 정규화
         octree->splat(loadedPositions, loadedNormals);
     }
 
