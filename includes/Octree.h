@@ -80,6 +80,12 @@ public:
     void splat(const std::vector<glm::vec3> &positions,
                const std::vector<glm::vec3> &normals);
 
+    // ── PSR Step 3: Poisson 풀이 ─────────────────────────────────────────
+    // splat() 이후 호출.
+    // Galerkin 이산화: L x = b  (L_{ij} = ⟨∇F_i,∇F_j⟩, b_i = -⟨∇F_i,V⟩)
+    // CG 풀이 후 각 노드의 scalarValue ← x_o
+    void poissonSolve(int maxIter = 2000, float tol = 1e-6f);
+
     // ── 출력 ──────────────────────────────────────────────────────────────
     void printStats() const;
 

@@ -35,18 +35,21 @@ public:
     // densityCoeff : c_o = Σ_s α_{o,s}          (Phase1: W 계산용 밀도 계수)
     // vectorCoeff  : Σ (α_{o,s}/W_s) * N_s      (Phase4: V의 basis 계수 α_o)
     // splatWeight  : Σ α_{o,s}                   (진단용)
-    // scalarValue  : χ(o)                        (Poisson 풀이 결과, 추후)
+    // scalarValue  : χ(o)                        (Poisson 풀이 결과)
+    // nodeIndex    : poissonSolve 에서 행렬 인덱스로 사용
     float     densityCoeff;
     glm::vec3 vectorCoeff;
     float     splatWeight;
     float     scalarValue;
+    int       nodeIndex;
 
     // ─────────────────────────────────────────────────────────────────────
     OctreeNode(glm::vec3 center_, float halfSize_, int depth_,
                OctreeNode* parent_, int childIndex_)
         : center(center_), halfSize(halfSize_), depth(depth_),
           childIndex(childIndex_), parent(parent_),
-          densityCoeff(0.0f), vectorCoeff(0.0f), splatWeight(0.0f), scalarValue(0.0f)
+          densityCoeff(0.0f), vectorCoeff(0.0f), splatWeight(0.0f), scalarValue(0.0f),
+        nodeIndex(-1)
     {
         for (int i = 0; i < 8; i++) children[i] = nullptr;
     }

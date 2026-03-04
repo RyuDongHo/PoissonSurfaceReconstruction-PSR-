@@ -1,4 +1,5 @@
-#include "Octree.h"
+﻿#include "Octree.h"
+#include "PoissonSolver.h"
 #include <queue>
 #include <cmath>
 #include <cassert>
@@ -486,6 +487,7 @@ void Octree::splat(const std::vector<glm::vec3> &positions,
            splatted, N, filled, (int)allNodes.size());
 }
 
+
 // ============================================================================
 // printStats
 // ============================================================================
@@ -526,4 +528,12 @@ void Octree::printStats() const
         printf("    depth %2d : %4d nodes  (%d leaves)\n",
                d, depthCount[d], leafDepthCount[d]);
     printf("====================\n\n");
+}
+
+// ============================================================================
+// Octree::poissonSolve  (PoissonSolver 에 위임)
+// ============================================================================
+void Octree::poissonSolve(int maxIter, float tol)
+{
+    PoissonSolver::solve(this, maxIter, tol);
 }
