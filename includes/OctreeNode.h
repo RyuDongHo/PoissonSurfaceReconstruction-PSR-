@@ -79,14 +79,20 @@ public:
         return 0.0f;
     }
 
+    float width() const
+    {
+        return halfSize * 2.0f;
+    }
+
     // 3D tensor-product basis: F_o(p) = B(tx) * B(ty) * B(tz)
     // (getNeighbors27 이 이를 격자 기준으로 계산하므로 직접 호출은 드묾)
     float F(const glm::vec3& p) const
     {
-        float tx = (p.x - center.x) / halfSize;
-        float ty = (p.y - center.y) / halfSize;
-        float tz = (p.z - center.z) / halfSize;
-        return BSpline1D(tx) * BSpline1D(ty) * BSpline1D(tz);
+        float w = width();
+        float tx = (p.x - center.x) / w;
+        float ty = (p.y - center.y) / w;
+        float tz = (p.z - center.z) / w;
+        return (BSpline1D(tx) * BSpline1D(ty) * BSpline1D(tz)) / (w * w * w);
     }
 
     // 포인트가 노드 AABB 내부에 있는지 (경계 포함)

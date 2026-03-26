@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <algorithm>
 #include <unordered_set>
+#include <unordered_map>
+#include <utility>
 
 // ============================================================================
 // 내부 헬퍼 매크로
@@ -22,7 +24,10 @@ Octree::Octree(int maxDepth_, int densityDepth_, int minPointsToSplit_)
       densityDepth(densityDepth_),
       minPointsToSplit(minPointsToSplit_),
       totalNodeCount(0),
-      leafNodeCount(0)
+      leafNodeCount(0),
+      regularGridResolution(0),
+      regularGridMin(0.0f),
+      regularGridStep(0.0f)
 {
 }
 
@@ -96,7 +101,9 @@ void Octree::build(const std::vector<glm::vec3> &positions,
     // 정육면체 + 약간의 여백 (경계 포인트가 밖으로 나가지 않도록)
     glm::vec3 bbCenter = (bbMin + bbMax) * 0.5f;
     glm::vec3 bbExtent = bbMax - bbMin;
-    float extent = std::max({bbExtent.x, bbExtent.y, bbExtent.z}) * 0.5f * 1.001f;
+    // Add a generous padding so reconstructed isosurface does not get clipped
+    // at the root boundary (which creates open boundaries in the final mesh).
+    float extent = std::max({bbExtent.x, bbExtent.y, bbExtent.z}) * 0.5f * 1.10f;
 
     printf("[Octree] BBox center: (%.3f, %.3f, %.3f)  halfSize: %.3f\n",
            bbCenter.x, bbCenter.y, bbCenter.z, extent);
@@ -108,6 +115,7 @@ void Octree::build(const std::vector<glm::vec3> &positions,
     root = new OctreeNode(bbCenter, extent, 0, nullptr, -1);
     totalNodeCount = 1;
     leafNodeCount = 0;
+    clearRegularGridField();
 
     // 모든 포인트를 루트에 할당
     root->pointIndices.resize(positions.size());
@@ -123,7 +131,8 @@ void Octree::build(const std::vector<glm::vec3> &positions,
         OctreeNode *node = q.front();
         q.pop();
 
-        bool shouldSplit = ((int)node->pointIndices.size() > minPointsToSplit) && (node->depth < maxDepth);
+        // Paper-style discretization: every sample should lie in a depth-D leaf.
+        bool shouldSplit = (!node->pointIndices.empty()) && (node->depth < maxDepth);
 
         if (!shouldSplit)
         {
@@ -155,6 +164,58 @@ void Octree::build(const std::vector<glm::vec3> &positions,
 
     printf("[Octree] Build done.  totalNodes: %d  leaves: %d\n",
            totalNodeCount, leafNodeCount);
+
+    // Validate point-to-node correspondence after build.
+    // Each input point index should appear in exactly one leaf node.
+    {
+        std::vector<OctreeNode *> leaves = getAllLeaves();
+        std::vector<int> freq(positions.size(), 0);
+
+        int badIndexRefs = 0;
+        int containMismatches = 0;
+        int maxLeafDepth = 0;
+        int leafAtMaxDepth = 0;
+        int leafShallower = 0;
+        int pointsAtMaxDepthLeaves = 0;
+        int pointsAtShallowerLeaves = 0;
+
+        for (OctreeNode *lf : leaves)
+        {
+            if (!lf) continue;
+            maxLeafDepth = std::max(maxLeafDepth, lf->depth);
+            if (lf->depth == maxDepth) leafAtMaxDepth++;
+            else if (lf->depth < maxDepth) leafShallower++;
+
+            for (int pi : lf->pointIndices)
+            {
+                if (pi < 0 || pi >= (int)positions.size())
+                {
+                    badIndexRefs++;
+                    continue;
+                }
+                freq[(size_t)pi]++;
+                if (!lf->contains(positions[(size_t)pi]))
+                    containMismatches++;
+                if (lf->depth == maxDepth) pointsAtMaxDepthLeaves++;
+                else if (lf->depth < maxDepth) pointsAtShallowerLeaves++;
+            }
+        }
+
+        int missing = 0;
+        int duplicated = 0;
+        for (int c : freq)
+        {
+            if (c == 0) missing++;
+            else if (c > 1) duplicated++;
+        }
+
+        printf("[Octree][Validate] points=%zu missing=%d duplicated=%d badRefs=%d containMismatch=%d\n",
+               positions.size(), missing, duplicated, badIndexRefs, containMismatches);
+        printf("[Octree][Validate] leafDepth max=%d  leaves@maxDepth=%d  leaves<maxDepth=%d\n",
+               maxLeafDepth, leafAtMaxDepth, leafShallower);
+        printf("[Octree][Validate] pointMembership: @maxDepthLeaves=%d  @shallowerLeaves=%d\n",
+               pointsAtMaxDepthLeaves, pointsAtShallowerLeaves);
+    }
 }
 
 // ============================================================================
@@ -198,6 +259,7 @@ OctreeNode *Octree::findLeaf(const glm::vec3 &p) const
 // ============================================================================
 OctreeNode *Octree::findNodeNearestDepth(const glm::vec3 &targetCenter, int targetDepth) const
 {
+    if (!root) return nullptr;
     OctreeNode *node = root;
     while (node->depth < targetDepth && !node->isLeaf())
     {
@@ -205,6 +267,111 @@ OctreeNode *Octree::findNodeNearestDepth(const glm::vec3 &targetCenter, int targ
         node = node->children[ci];
     }
     return node;
+}
+
+OctreeNode *Octree::findNodeAtDepth(const glm::vec3 &targetCenter, int targetDepth) const
+{
+    OctreeNode *node = findNodeNearestDepth(targetCenter, targetDepth);
+    return (node && node->depth == targetDepth) ? node : nullptr;
+}
+
+OctreeNode *Octree::ensureNodeAtDepth(const glm::vec3 &targetCenter, int targetDepth)
+{
+    if (!root) return nullptr;
+    targetDepth = std::max(0, std::min(targetDepth, maxDepth));
+
+    OctreeNode *node = root;
+    while (node->depth < targetDepth)
+    {
+        if (node->isLeaf())
+        {
+            subdivide(node);
+            // splitting one leaf into 8 leaves: net +7 leaves
+            leafNodeCount += 7;
+        }
+        int ci = childIndexOf(node->center, targetCenter);
+        node = node->children[ci];
+    }
+    return node;
+}
+
+void Octree::prepareEvaluationTree(const std::vector<glm::vec3> &positions)
+{
+    if (!root || positions.empty())
+        return;
+
+    auto ensureTrilinear8AtDepth = [&](const glm::vec3 &pos, int depth)
+    {
+        float h = root->halfSize / (float)(1 << depth);
+        float step = h * 2.0f;
+        glm::vec3 origin = root->center - glm::vec3(root->halfSize) + glm::vec3(h);
+
+        float fx = (pos.x - origin.x) / step;
+        float fy = (pos.y - origin.y) / step;
+        float fz = (pos.z - origin.z) / step;
+
+        int ix = (int)std::floor(fx);
+        int iy = (int)std::floor(fy);
+        int iz = (int)std::floor(fz);
+
+        int maxIdx = (1 << depth) - 1;
+        ix = std::max(0, std::min(ix, maxIdx - 1));
+        iy = std::max(0, std::min(iy, maxIdx - 1));
+        iz = std::max(0, std::min(iz, maxIdx - 1));
+
+        for (int dz = 0; dz < 2; ++dz)
+        for (int dy = 0; dy < 2; ++dy)
+        for (int dx = 0; dx < 2; ++dx)
+        {
+            glm::vec3 nc = origin + glm::vec3((ix + dx) * step, (iy + dy) * step, (iz + dz) * step);
+            ensureNodeAtDepth(nc, depth);
+        }
+    };
+
+    auto ensureNeighbors27AtDepth = [&](const glm::vec3 &pos, int depth)
+    {
+        float h = root->halfSize / (float)(1 << depth);
+        float step = h * 2.0f;
+        glm::vec3 origin = root->center - glm::vec3(root->halfSize) + glm::vec3(h);
+
+        float fx = (pos.x - origin.x) / step;
+        float fy = (pos.y - origin.y) / step;
+        float fz = (pos.z - origin.z) / step;
+
+        int ix_lo = (int)std::floor(fx - 0.5f);
+        int iy_lo = (int)std::floor(fy - 0.5f);
+        int iz_lo = (int)std::floor(fz - 0.5f);
+
+        int maxIdx = (1 << depth) - 1;
+        ix_lo = std::max(0, std::min(ix_lo, maxIdx - 2));
+        iy_lo = std::max(0, std::min(iy_lo, maxIdx - 2));
+        iz_lo = std::max(0, std::min(iz_lo, maxIdx - 2));
+
+        for (int dz = 0; dz < 3; ++dz)
+        for (int dy = 0; dy < 3; ++dy)
+        for (int dx = 0; dx < 3; ++dx)
+        {
+            glm::vec3 nc = origin + glm::vec3(
+                (float)(ix_lo + dx) * step,
+                (float)(iy_lo + dy) * step,
+                (float)(iz_lo + dz) * step);
+            ensureNodeAtDepth(nc, depth);
+        }
+    };
+
+    int beforeNodes = totalNodeCount;
+    int beforeLeaves = leafNodeCount;
+
+    for (const glm::vec3 &p : positions)
+    {
+        ensureTrilinear8AtDepth(p, densityDepth);
+        ensureNeighbors27AtDepth(p, densityDepth);
+        for (int depth = 1; depth <= maxDepth; ++depth)
+            ensureTrilinear8AtDepth(p, depth);
+    }
+
+    printf("[Octree] Evaluation tree fixed. nodes: %d -> %d  leaves: %d -> %d\n",
+           beforeNodes, totalNodeCount, beforeLeaves, leafNodeCount);
 }
 
 // ============================================================================
@@ -215,6 +382,16 @@ OctreeNode *Octree::findNodeNearestDepth(const glm::vec3 &targetCenter, int targ
 void Octree::getTrilinear8(const glm::vec3 &pos, int depth,
                             OctreeNode *outNodes[8], float outWeights[8]) const
 {
+    if (depth <= 0)
+    {
+        for (int i = 0; i < 8; ++i)
+        {
+            outNodes[i] = root;
+            outWeights[i] = (i == 0) ? 1.0f : 0.0f;
+        }
+        return;
+    }
+
     float h    = root->halfSize / (float)(1 << depth);
     float step = h * 2.0f;
     glm::vec3 origin = root->center - glm::vec3(root->halfSize) + glm::vec3(h);
@@ -244,7 +421,7 @@ void Octree::getTrilinear8(const glm::vec3 &pos, int depth,
         // linear B-spline 가중치 = α_{o,s}
         outWeights[i] = (dx ? lx : 1.0f-lx) * (dy ? ly : 1.0f-ly) * (dz ? lz : 1.0f-lz);
         glm::vec3 nc = origin + glm::vec3((ix+dx)*step, (iy+dy)*step, (iz+dz)*step);
-        outNodes[i] = findNodeNearestDepth(nc, depth);
+        outNodes[i] = findNodeAtDepth(nc, depth);
     }
 }
 
@@ -257,6 +434,7 @@ void Octree::getNeighbors27(const glm::vec3 &pos, int depth,
 {
     float h    = root->halfSize / (float)(1 << depth);
     float step = h * 2.0f;
+    float invStep3 = 1.0f / (step * step * step);
 
     glm::vec3 origin = root->center - glm::vec3(root->halfSize) + glm::vec3(h);
 
@@ -291,13 +469,13 @@ void Octree::getNeighbors27(const glm::vec3 &pos, int depth,
     for (int dx = 0; dx < 3; dx++)
     {
         int i = dx + dy * 3 + dz * 9;
-        outWeights[i] = wx[dx] * wy[dy] * wz[dz];
+        outWeights[i] = wx[dx] * wy[dy] * wz[dz] * invStep3;
 
         glm::vec3 nodeCenter = origin + glm::vec3(
             (float)(ix_lo + dx) * step,
             (float)(iy_lo + dy) * step,
             (float)(iz_lo + dz) * step);
-        outNodes[i] = findNodeNearestDepth(nodeCenter, depth);
+        outNodes[i] = findNodeAtDepth(nodeCenter, depth);
     }
 }
 
@@ -327,46 +505,80 @@ void Octree::computeDensityField(const std::vector<glm::vec3> &positions)
 
     OctreeNode *nbrs8[8];
     float       wgts8[8];
+    int totalRefs = 0;
+    int fallbackRefs = 0;
+    int collapsedSamples = 0;
+    int fallbackSamples = 0;
 
-    // 모든 샘플 s 순회 → c_o = Σ_s α_{o,s}  적립 (at D̂ = densityDepth)
-    // α_{o,s}: trilinear (linear B-spline), 8 이웃
+    // Accumulate c_o = Σ_s α_{o,s} at depth D̂
+    // α_{o,s}: trilinear interpolation weights (8-neighbor)
+    // Per paper: "the eight depth-D nodes closest to s.p"
     for (const auto &p : positions)
     {
         getTrilinear8(p, densityDepth, nbrs8, wgts8);
+        int uniq = 0;
+        bool hasFallback = false;
+        for (int k = 0; k < 8; k++)
+        {
+            if (!nbrs8[k]) continue;
+            totalRefs++;
+            if (nbrs8[k]->depth < densityDepth)
+            {
+                fallbackRefs++;
+                hasFallback = true;
+            }
+            bool seen = false;
+            for (int u = 0; u < k; ++u)
+            {
+                if (nbrs8[u] == nbrs8[k]) { seen = true; break; }
+            }
+            if (!seen) uniq++;
+        }
+        if (uniq < 8) collapsedSamples++;
+        if (hasFallback) fallbackSamples++;
+
         for (int k = 0; k < 8; k++)
             if (nbrs8[k]) nbrs8[k]->densityCoeff += wgts8[k];
     }
 
+    auto allNodesNow = getAllNodes();
     printf("[Octree] DensityField done (D_hat=%d). nodes with c_o>0: ", densityDepth);
     int cnt = 0;
-    for (auto *n : allNodes) if (n->densityCoeff > 0.0f) cnt++;
-    printf("%d / %d\n", cnt, (int)allNodes.size());
+    for (auto *n : allNodesNow) if (n->densityCoeff > 0.0f) cnt++;
+    printf("%d / %d\n", cnt, (int)allNodesNow.size());
+    printf("[Octree] DensityField trilinear8: refs=%d fallbackRefs=%d (%.2f%%) collapsedSamples=%d/%zu fallbackSamples=%d/%zu\n",
+           totalRefs, fallbackRefs, totalRefs > 0 ? 100.0 * (double)fallbackRefs / (double)totalRefs : 0.0,
+           collapsedSamples, positions.size(), fallbackSamples, positions.size());
 }
 
 // ============================================================================
-// evaluateW  —  논문 W_{D̂}(q) 평가 (Phase 2)
+// evaluateW  —  논문 W_{D̂}(q) 평가
 //
 // 논문 수식:
 //   W_{D̂}(q) = Σ_{s∈S} Σ_{o∈Ngbr_{D̂}(s)} α_{o,s} · F_o(q)
 //
-// 구현 (computeDensityField 에서 c_o = Σ_s α_{o,s} 적립 후):
-//   = Σ_o F_o(q) · c_o
-//
-// F_o(q) 는 tent B-spline 기저 함수로, support 가 노드 o 의 인접 셀까지만
-// 이므로 q 의 D̂ 깊이 인접 8개 노드에서만  F_o(q) ≠ 0.
-//   → wgts[k] = F_{nbrs[k]}(q)  (getTrilinear8 이 이를 계산)
+// 구현:
+//   computeDensityField()에서 c_o = Σ_s α_{o,s}를 미리 쌓았으므로
+//   여기서는 q 주변 27개 노드만 순회해
+//   W(q) = Σ_o c_o F_o(q) 를 평가한다.
 // ============================================================================
 float Octree::evaluateW(const glm::vec3 &q) const
 {
-    OctreeNode *nbrs27[27];
-    float       wgts27[27];
-    // q 의 D̂ 깊이 quadratic B-spline 27 이웃: wgts[k] = F_{nbrs[k]}(q)
-    getNeighbors27(q, densityDepth, nbrs27, wgts27);
+    OctreeNode *nbrs27_q[27];
+    float       wgts27_q[27];
+    
+    // q의 27개 이웃 노드와 F_o(q) 계산
+    getNeighbors27(q, densityDepth, nbrs27_q, wgts27_q);
 
-    // W_{D̂}(q) = Σ_o F_o(q) · c_o
     float W = 0.0f;
-    for (int k = 0; k < 27; k++)
-        if (nbrs27[k]) W += wgts27[k] * nbrs27[k]->densityCoeff;
+
+    // W(q) = Σ_o c_o F_o(q)
+    for (int i = 0; i < 27; i++)
+    {
+        if (!nbrs27_q[i] || wgts27_q[i] <= 0.0f) continue;
+        W += nbrs27_q[i]->densityCoeff * wgts27_q[i];
+    }
+
     return W;
 }
 
@@ -454,25 +666,55 @@ void Octree::splat(const std::vector<glm::vec3> &positions,
     OctreeNode *nbrs8[8];
     float       wgts8[8];
     int         splatted = 0;
+    int totalRefs = 0;
+    int fallbackRefs = 0;
+    int collapsedSamples = 0;
+    int fallbackSamples = 0;
 
     for (int i = 0; i < N; i++)
     {
         float W_s = evaluateW(positions[i]);
         if (W_s < 1e-8f) continue;
 
+        // Paper Eq. (Section 4.5):
+        //   Depth(s.p) = min(D, D + log4(W_Dhat(s.p) / W))
+        // Use adaptive basis width so sparse regions contribute with wider
+        // kernels and dense regions retain higher-frequency detail.
         float logRatio = std::log2(W_s / wAvg) * 0.5f;
         int sampleDepth = std::min(maxDepth,
                           maxDepth + (int)std::floor(logRatio));
         sampleDepth = std::max(0, sampleDepth);
 
-        // α_{o,s}: trilinear (linear B-spline), 8 이웃
+        // α_{o,s}: trilinear (8-neighbor, 2x2x2 grid)
         getTrilinear8(positions[i], sampleDepth, nbrs8, wgts8);
+        int uniq = 0;
+        bool hasFallback = false;
+        for (int k = 0; k < 8; ++k)
+        {
+            if (!nbrs8[k]) continue;
+            totalRefs++;
+            if (nbrs8[k]->depth < sampleDepth)
+            {
+                fallbackRefs++;
+                hasFallback = true;
+            }
+            bool seen = false;
+            for (int u = 0; u < k; ++u)
+            {
+                if (nbrs8[u] == nbrs8[k]) { seen = true; break; }
+            }
+            if (!seen) uniq++;
+        }
+        if (uniq < 8) collapsedSamples++;
+        if (hasFallback) fallbackSamples++;
 
         bool contributed = false;
         for (int k = 0; k < 8; k++)
         {
             if (!nbrs8[k] || wgts8[k] <= 0.0f) continue;
             float scale = wgts8[k] / W_s;
+            // The paper assumes inward-facing sample normals.
+            // Callers must provide normals in that convention.
             nbrs8[k]->vectorCoeff += scale * normals[i];
             nbrs8[k]->splatWeight  += wgts8[k];
             contributed = true;
@@ -480,11 +722,211 @@ void Octree::splat(const std::vector<glm::vec3> &positions,
         if (contributed) splatted++;
     }
 
+    auto allNodesNow = getAllNodes();
     int filled = 0;
-    for (auto *n : allNodes) if (n->splatWeight > 1e-8f) filled++;
-    printf("[Octree] Splat done. samples contributed: %d / %d  "
-           "nodes filled: %d / %d\n",
-           splatted, N, filled, (int)allNodes.size());
+    for (auto *n : allNodesNow)
+        if (n->splatWeight > 1e-8f) filled++;
+
+    // Diffuse the finest-level vector field locally to bridge sparse holes.
+    // This keeps the solve basis fixed at maxDepth while approximating the
+    // wider kernels that PSR uses in under-sampled regions.
+    {
+        struct GridKey
+        {
+            int x, y, z;
+            bool operator==(const GridKey &o) const
+            {
+                return x == o.x && y == o.y && z == o.z;
+            }
+        };
+        struct GridKeyHash
+        {
+            size_t operator()(const GridKey &k) const
+            {
+                size_t h = 1469598103934665603ull;
+                h ^= (size_t)k.x; h *= 1099511628211ull;
+                h ^= (size_t)k.y; h *= 1099511628211ull;
+                h ^= (size_t)k.z; h *= 1099511628211ull;
+                return h;
+            }
+        };
+
+        std::vector<OctreeNode *> finestNodes;
+        finestNodes.reserve(allNodesNow.size());
+        std::unordered_map<GridKey, OctreeNode *, GridKeyHash> finestMap;
+        finestMap.reserve(allNodesNow.size());
+
+        const float step = (2.0f * root->halfSize) / (float)(1 << maxDepth);
+        const glm::vec3 domainMin = root->center - glm::vec3(root->halfSize);
+
+        for (OctreeNode *n : allNodesNow)
+        {
+            if (!n || n->depth != maxDepth)
+                continue;
+            finestNodes.push_back(n);
+            int ix = (int)std::lround((n->center.x - domainMin.x) / step - 0.5f);
+            int iy = (int)std::lround((n->center.y - domainMin.y) / step - 0.5f);
+            int iz = (int)std::lround((n->center.z - domainMin.z) / step - 0.5f);
+            finestMap[GridKey{ix, iy, iz}] = n;
+        }
+
+        const int smoothPasses = 0;
+        for (int pass = 0; pass < smoothPasses; ++pass)
+        {
+            std::vector<glm::vec3> nextCoeff(finestNodes.size(), glm::vec3(0.0f));
+            std::vector<float> nextWeight(finestNodes.size(), 0.0f);
+
+            for (size_t idx = 0; idx < finestNodes.size(); ++idx)
+            {
+                OctreeNode *n = finestNodes[idx];
+                int ix = (int)std::lround((n->center.x - domainMin.x) / step - 0.5f);
+                int iy = (int)std::lround((n->center.y - domainMin.y) / step - 0.5f);
+                int iz = (int)std::lround((n->center.z - domainMin.z) / step - 0.5f);
+
+                glm::vec3 sumVec(0.0f);
+                float sumW = 0.0f;
+                float nbrWeightSum = 0.0f;
+                int nbrCount = 0;
+
+                for (int dz = -1; dz <= 1; ++dz)
+                for (int dy = -1; dy <= 1; ++dy)
+                for (int dx = -1; dx <= 1; ++dx)
+                {
+                    auto it = finestMap.find(GridKey{ix + dx, iy + dy, iz + dz});
+                    if (it == finestMap.end())
+                        continue;
+
+                    OctreeNode *nbr = it->second;
+                    float spatialW = (dx == 0 && dy == 0 && dz == 0) ? 4.0f : 1.0f;
+                    float dataW = std::max(nbr->splatWeight, 1e-6f);
+                    float w = spatialW * dataW;
+                    sumVec += nbr->vectorCoeff * w;
+                    sumW += w;
+                    if (!(dx == 0 && dy == 0 && dz == 0))
+                    {
+                        nbrWeightSum += nbr->splatWeight;
+                        nbrCount++;
+                    }
+                }
+
+                if (sumW <= 0.0f)
+                {
+                    nextCoeff[idx] = n->vectorCoeff;
+                    nextWeight[idx] = n->splatWeight;
+                    continue;
+                }
+
+                glm::vec3 avg = sumVec / sumW;
+                float nbrAvgWeight = (nbrCount > 0) ? (nbrWeightSum / (float)nbrCount) : 0.0f;
+                float blend = 0.0f;
+                if (n->splatWeight <= 1e-8f)
+                    blend = 1.0f;
+                else if (nbrAvgWeight > 0.0f)
+                    blend = glm::clamp(1.0f - (n->splatWeight / (nbrAvgWeight + 1e-6f)), 0.0f, 0.5f);
+
+                nextCoeff[idx] = n->vectorCoeff * (1.0f - blend) + avg * blend;
+                nextWeight[idx] = std::max(n->splatWeight, nbrAvgWeight * blend);
+            }
+
+            for (size_t idx = 0; idx < finestNodes.size(); ++idx)
+            {
+                finestNodes[idx]->vectorCoeff = nextCoeff[idx];
+                finestNodes[idx]->splatWeight = nextWeight[idx];
+            }
+        }
+    }
+
+    printf("[Octree] Splatting done. samples: %d / %d  nodes: %d / %d\n",
+           splatted, N, filled, (int)allNodesNow.size());
+    printf("[Octree] Splat trilinear8@adaptiveDepth: refs=%d fallbackRefs=%d (%.2f%%) collapsedSamples=%d/%d fallbackSamples=%d/%d\n",
+           totalRefs, fallbackRefs, totalRefs > 0 ? 100.0 * (double)fallbackRefs / (double)totalRefs : 0.0,
+           collapsedSamples, N, fallbackSamples, N);
+}
+
+void Octree::clearRegularGridField()
+{
+    regularGridResolution = 0;
+    regularGridMin = glm::vec3(0.0f);
+    regularGridStep = 0.0f;
+    regularGridChi.clear();
+}
+
+void Octree::storeRegularGridField(int resolution,
+                                   const glm::vec3 &domainMin,
+                                   float step,
+                                   std::vector<float> values)
+{
+    regularGridResolution = resolution;
+    regularGridMin = domainMin;
+    regularGridStep = step;
+    regularGridChi = std::move(values);
+}
+
+bool Octree::hasRegularGridField() const
+{
+    if (regularGridResolution <= 0 || regularGridStep <= 0.0f)
+        return false;
+    const size_t side = (size_t)regularGridResolution + 1;
+    return regularGridChi.size() == side * side * side;
+}
+
+float Octree::sampleRegularGrid(const glm::vec3 &p) const
+{
+    if (!hasRegularGridField())
+        return 0.0f;
+
+    const int res = regularGridResolution;
+    const auto idx = [res](int x, int y, int z) -> size_t
+    {
+        return (size_t)x + ((size_t)res + 1) * ((size_t)y + ((size_t)res + 1) * (size_t)z);
+    };
+    const auto clampCoord = [res](int v) { return std::max(0, std::min(res, v)); };
+
+    const glm::vec3 g = (p - regularGridMin) / regularGridStep;
+    int ix = (int)std::floor(g.x);
+    int iy = (int)std::floor(g.y);
+    int iz = (int)std::floor(g.z);
+    float fx = g.x - (float)ix;
+    float fy = g.y - (float)iy;
+    float fz = g.z - (float)iz;
+
+    ix = std::max(0, std::min(ix, res - 1));
+    iy = std::max(0, std::min(iy, res - 1));
+    iz = std::max(0, std::min(iz, res - 1));
+    fx = std::max(0.0f, std::min(1.0f, fx));
+    fy = std::max(0.0f, std::min(1.0f, fy));
+    fz = std::max(0.0f, std::min(1.0f, fz));
+
+    float out = 0.0f;
+    for (int dz = 0; dz < 2; ++dz)
+    for (int dy = 0; dy < 2; ++dy)
+    for (int dx = 0; dx < 2; ++dx)
+    {
+        const float wx = dx ? fx : (1.0f - fx);
+        const float wy = dy ? fy : (1.0f - fy);
+        const float wz = dz ? fz : (1.0f - fz);
+        const int sx = clampCoord(ix + dx);
+        const int sy = clampCoord(iy + dy);
+        const int sz = clampCoord(iz + dz);
+        out += wx * wy * wz * regularGridChi[idx(sx, sy, sz)];
+    }
+    return out;
+}
+
+glm::vec3 Octree::gradientRegularGrid(const glm::vec3 &p) const
+{
+    if (!hasRegularGridField())
+        return glm::vec3(0.0f);
+
+    const float h = regularGridStep;
+    const glm::vec3 ex(h, 0.0f, 0.0f);
+    const glm::vec3 ey(0.0f, h, 0.0f);
+    const glm::vec3 ez(0.0f, 0.0f, h);
+
+    return glm::vec3(
+        (sampleRegularGrid(p + ex) - sampleRegularGrid(p - ex)) / (2.0f * h),
+        (sampleRegularGrid(p + ey) - sampleRegularGrid(p - ey)) / (2.0f * h),
+        (sampleRegularGrid(p + ez) - sampleRegularGrid(p - ez)) / (2.0f * h));
 }
 
 

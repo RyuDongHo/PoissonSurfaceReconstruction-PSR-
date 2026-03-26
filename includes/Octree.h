@@ -85,6 +85,15 @@ public:
     // Galerkin 이산화: L x = b  (L_{ij} = ⟨∇F_i,∇F_j⟩, b_i = -⟨∇F_i,V⟩)
     // CG 풀이 후 각 노드의 scalarValue ← x_o
     void poissonSolve(int maxIter = 2000, float tol = 1e-6f);
+    void prepareEvaluationTree(const std::vector<glm::vec3> &positions);
+    void clearRegularGridField();
+    void storeRegularGridField(int resolution,
+                               const glm::vec3 &domainMin,
+                               float step,
+                               std::vector<float> values);
+    bool hasRegularGridField() const;
+    float sampleRegularGrid(const glm::vec3 &p) const;
+    glm::vec3 gradientRegularGrid(const glm::vec3 &p) const;
 
     // ── 출력 ──────────────────────────────────────────────────────────────
     void printStats() const;
@@ -106,9 +115,16 @@ private:
     // targetCenter 위치에서 targetDepth까지 내려간 노드 반환
     // (해당 depth에 노드 없으면 가장 깊은 조상 반환)
     OctreeNode *findNodeNearestDepth(const glm::vec3 &targetCenter, int targetDepth) const;
+    OctreeNode *findNodeAtDepth(const glm::vec3 &targetCenter, int targetDepth) const;
+    OctreeNode *ensureNodeAtDepth(const glm::vec3 &targetCenter, int targetDepth);
 
     // 메모리 해제 (재귀)
     void deleteSubtree(OctreeNode *node);
+
+    int regularGridResolution;
+    glm::vec3 regularGridMin;
+    float regularGridStep;
+    std::vector<float> regularGridChi;
 };
 
 #endif // OCTREE_H
